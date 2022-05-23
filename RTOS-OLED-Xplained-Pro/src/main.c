@@ -89,6 +89,8 @@ QueueHandle_t xQueueADC;
 QueueHandle_t xQueueEvent;
 SemaphoreHandle_t xSemaphoreAfecAlarm;
 SemaphoreHandle_t xSemaphoreEventAlarm;
+SemaphoreHandle_t xSemaphoreDeletaAlarme;
+
 
 /************************************************************************/
 /* prototypes                                                           */
@@ -246,6 +248,8 @@ static void task_adc(void *pvParameters) {
 	adcData adc;
 	
 	int i = 0;
+	int j = 0;
+	int alarme;
 
 	while (1) {
 		if (xQueueReceive(xQueueADC, &(adc), 1000)) {
@@ -256,9 +260,17 @@ static void task_adc(void *pvParameters) {
 				i++;
 				if (i == 5){
 					xSemaphoreGive(xSemaphoreAfecAlarm);
+					alarme = 1;
 					i = 0;
 				}
-			} 
+			} if (adc.value < 1000 && alarme){
+				j++;
+				if (j == 10){
+					xSemaphoreGive(xSemaphoreDeletaAlarme);
+					alarme = 0;
+					j = 0;
+				}
+			}
 		} 
 	}
 }
@@ -318,6 +330,10 @@ static void task_alarm(void *pvParameters) {
 			printf("[ALARM ] %02d:%02d:%04d %02d:%02d:%02d  EVENT\n", current_day, current_month, current_year, current_hour, current_min, current_sec);
 			TC_init(TC0, ID_TC2, 2, 5);
 			tc_start(TC0, 2);
+		}
+		if (xSemaphoreTake(xSemaphoreDeletaAlarme, 10 / portTICK_PERIOD_MS)){
+			tc_stop(TC1, 1);
+			pio_set(LED_1_PIO, LED_1_IDX_MASK);
 		}
 	}
 }
@@ -515,6 +531,11 @@ int main(void) {
 	xSemaphoreAfecAlarm = xSemaphoreCreateBinary();
 	if (xSemaphoreAfecAlarm == NULL)
 		printf("falha em criar o semaforo \n");
+
+	xSemaphoreDeletaAlarme = xSemaphoreCreateBinary();
+	if (xSemaphoreDeletaAlarme == NULL)
+		printf("falha em criar o semaforo \n");
+
 
 	xSemaphoreEventAlarm = xSemaphoreCreateBinary();
 	if (xSemaphoreEventAlarm == NULL)
