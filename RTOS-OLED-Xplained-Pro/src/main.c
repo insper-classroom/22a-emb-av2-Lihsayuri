@@ -50,6 +50,9 @@
 #define TASK_EVENT_STACK_SIZE (1024*10 / sizeof(portSTACK_TYPE))
 #define TASK_EVENT_STACK_PRIORITY (tskIDLE_PRIORITY)
 
+#define TASK_ALARM_STACK_SIZE (1024*10 / sizeof(portSTACK_TYPE))
+#define TASK_ALARM_STACK_PRIORITY (tskIDLE_PRIORITY)
+
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,  signed char *pcTaskName);
 extern void vApplicationIdleHook(void);
 extern void vApplicationTickHook(void);
@@ -84,6 +87,8 @@ typedef struct  {
 
 QueueHandle_t xQueueADC;
 QueueHandle_t xQueueEvent;
+SemaphoreHandle_t xSemaphoreAfecAlarm;
+SemaphoreHandle_t xSemaphoreEventAlarm;
 
 /************************************************************************/
 /* prototypes                                                           */
@@ -91,7 +96,7 @@ QueueHandle_t xQueueEvent;
 void io_init(void);
 void TC_init(Tc *TC, int ID_TC, int TC_CHANNEL, int freq);
 static void config_AFEC_pot(Afec *afec, uint32_t afec_id, uint32_t afec_channel, afec_callback_t callback);
-
+void pisca_led (int n, int t, Pio *pio, const uint32_t ul_mask);
 /************************************************************************/
 /* RTOS application funcs                                               */
 /************************************************************************/
@@ -183,7 +188,6 @@ void RTC_Handler(void) {
 	
 	/* Time or date alarm */
 	if ((ul_status & RTC_SR_ALARM) == RTC_SR_ALARM) {
-		// o código para irq de alame vem aqui
 	}
 
 	rtc_clear_status(RTC, RTC_SCCR_SECCLR);
@@ -209,7 +213,7 @@ static void AFEC_pot_Callback(void) {
 
 static void task_adc(void *pvParameters) {
 	config_AFEC_pot(AFEC_POT, AFEC_POT_ID, AFEC_POT_CHANNEL, AFEC_pot_Callback);
-	TC_init(TC0, ID_TC1, 1, 10);
+	TC_init(TC0, ID_TC1, 1, 1);
 	tc_start(TC0, 1);
 	
 	/* Leitura do valor atual do RTC */
@@ -218,21 +222,31 @@ static void task_adc(void *pvParameters) {
 
 	// variável para recever dados da fila
 	adcData adc;
+	
+	int i = 0;
 
 	while (1) {
 		if (xQueueReceive(xQueueADC, &(adc), 1000)) {
 			rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
 			rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
 			printf("[AFEC ] %02d:%02d:%04d %02d:%02d:%02d %d \n", current_day, current_month, current_year, current_hour, current_min, current_sec, adc.value);
-		} else {
-			printf("Nao chegou um novo dado em 1 segundo \n");
-		}
+			if (adc.value > 3000){
+				i++;
+				if (i == 5){
+					xSemaphoreGive(xSemaphoreAfecAlarm);
+					i = 0;
+				}
+			} 
+		} 
 	}
 }
 
 static void task_event(void *pvParameters) {
 	// variável para recever dados da fila
 	adcDataBut but;
+	int status_but1 = 0;
+	int status_but2 = 0;
+	int status_but3 = 0;
 	
 	/* Leitura do valor atual do RTC */
 	uint32_t current_hour, current_min, current_sec;
@@ -242,12 +256,50 @@ static void task_event(void *pvParameters) {
 		if (xQueueReceive(xQueueEvent, &(but), 1000)) {
 			rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
 			rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
+			if (but.but == 1){
+				status_but1 = but.status;
+			} if (but.but == 2){
+				status_but2 = but.status;
+			} if (but.but == 3){
+				status_but3 = but.status;
+			}
+			
+			if ((status_but1 && status_but2) || (status_but1 && status_but3) || (status_but2 && status_but3)){
+				BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+				xSemaphoreGive(xSemaphoreEventAlarm);	
+			}
+
+			
 			printf("[EVENT ] %02d:%02d:%04d %02d:%02d:%02d  %d: %d\n", current_day, current_month, current_year, current_hour, current_min, current_sec, but.but, but.status);
-		} else {
-			printf("Nao chegou um novo dado em 1 segundo \n");
+		} 
+	}
+}
+
+
+static void task_alarm(void *pvParameters) {
+	// variável para recever dados da fila
+	
+	/* Leitura do valor atual do RTC */
+	uint32_t current_hour, current_min, current_sec;
+	uint32_t current_year, current_month, current_day, current_week;
+
+	while (1) {
+		if (xSemaphoreTake(xSemaphoreAfecAlarm, 10 / portTICK_PERIOD_MS)) {
+			rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
+			rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
+			printf("[ALARM ] %02d:%02d:%04d %02d:%02d:%02d  AFEC\n", current_day, current_month, current_year, current_hour, current_min, current_sec);
+			pisca_led(10, 100, LED_1_PIO, LED_1_IDX_MASK);
+		} if (xSemaphoreTake(xSemaphoreEventAlarm, 10 / portTICK_PERIOD_MS)) {
+			rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
+			rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
+			printf("[ALARM ] %02d:%02d:%04d %02d:%02d:%02d  EVENT\n", current_day, current_month, current_year, current_hour, current_min, current_sec);
+			pisca_led(10, 100, LED_2_PIO, LED_2_IDX_MASK);
+			vTaskDelay(100);
 		}
 	}
 }
+
+
 
 static void task_oled(void *pvParameters) {
 	gfx_mono_ssd1306_init();
@@ -261,6 +313,16 @@ static void task_oled(void *pvParameters) {
 /************************************************************************/
 /* funcoes                                                              */
 /************************************************************************/
+
+void pisca_led (int n, int t, Pio *pio, const uint32_t ul_mask) {
+	for (int i=0;i<n;i++){
+		pio_clear(pio, ul_mask);
+		delay_ms(t);
+		pio_set(pio, ul_mask);
+		delay_ms(t);
+	}
+}
+
 
 void TC_init(Tc *TC, int ID_TC, int TC_CHANNEL, int freq) {
 	uint32_t ul_div;
@@ -420,6 +482,13 @@ int main(void) {
 	calendar rtc_initial = {2018, 3, 19, 12, 15, 45 ,1};
 	RTC_init(RTC, ID_RTC, rtc_initial, RTC_SR_SEC|RTC_SR_ALARM);
 
+	xSemaphoreAfecAlarm = xSemaphoreCreateBinary();
+	if (xSemaphoreAfecAlarm == NULL)
+		printf("falha em criar o semaforo \n");
+
+	xSemaphoreEventAlarm = xSemaphoreCreateBinary();
+	if (xSemaphoreEventAlarm == NULL)
+		printf("falha em criar o semaforo \n");
 	
 	xQueueADC = xQueueCreate(100, sizeof(adcData));
 	  if (xQueueADC == NULL)
@@ -439,7 +508,11 @@ int main(void) {
 
 	if (xTaskCreate(task_event, "EVENT", TASK_EVENT_STACK_SIZE, NULL, TASK_EVENT_STACK_PRIORITY, NULL) != pdPASS) {
 		printf("Failed to create test ADC task\r\n");
-	}	  
+	}	
+	
+	if (xTaskCreate(task_alarm, "ALARM", TASK_ALARM_STACK_SIZE, NULL, TASK_ALARM_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create test ADC task\r\n");
+	}
 
 	vTaskStartScheduler();
 	while(1){}
