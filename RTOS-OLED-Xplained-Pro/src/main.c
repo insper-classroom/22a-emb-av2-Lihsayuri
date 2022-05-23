@@ -40,6 +40,10 @@
 #define AFEC_POT_ID ID_AFEC0
 #define AFEC_POT_CHANNEL 0 // Canal do pino PD30
 
+#define AFEC_POT2 AFEC1
+#define AFEC_POT2_ID ID_AFEC1
+#define AFEC_POT2_CHANNEL 1 // Canal do pino PC13
+
 /** RTOS  */
 #define TASK_OLED_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
 #define TASK_OLED_STACK_PRIORITY            (tskIDLE_PRIORITY)
@@ -86,10 +90,12 @@ typedef struct  {
 /************************************************************************/
 
 QueueHandle_t xQueueADC;
+QueueHandle_t xQueueADC2;
 QueueHandle_t xQueueEvent;
 SemaphoreHandle_t xSemaphoreAfecAlarm;
 SemaphoreHandle_t xSemaphoreEventAlarm;
 SemaphoreHandle_t xSemaphoreDeletaAlarme;
+SemaphoreHandle_t xMutexPot;
 
 
 /************************************************************************/
@@ -180,6 +186,9 @@ void TC1_Handler(void) {
 	/* Selecina canal e inicializa conversão */
 	afec_channel_enable(AFEC_POT, AFEC_POT_CHANNEL);
 	afec_start_software_conversion(AFEC_POT);
+
+	afec_channel_enable(AFEC_POT2, AFEC_POT2_CHANNEL);
+	afec_start_software_conversion(AFEC_POT2);	
 }
 
 void TC4_Handler(void) {
@@ -230,6 +239,13 @@ static void AFEC_pot_Callback(void) {
 	xQueueSendFromISR(xQueueADC, &adc, &xHigherPriorityTaskWoken);
 }
 
+static void AFEC_pot_Callback2(void) {
+	adcData adc;
+	adc.value = afec_channel_get_value(AFEC_POT2, AFEC_POT2_CHANNEL);
+	BaseType_t xHigherPriorityTaskWoken = pdTRUE;
+	xQueueSendFromISR(xQueueADC2, &adc, &xHigherPriorityTaskWoken);
+}
+
 /************************************************************************/
 /* TASKS                                                                */
 /************************************************************************/
@@ -255,7 +271,9 @@ static void task_adc(void *pvParameters) {
 		if (xQueueReceive(xQueueADC, &(adc), 1000)) {
 			rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
 			rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
+			xSemaphoreTake(xMutexPot, portMAX_DELAY );
 			printf("[AFEC ] %02d:%02d:%04d %02d:%02d:%02d %d \n", current_day, current_month, current_year, current_hour, current_min, current_sec, adc.value);
+			xSemaphoreGive( xMutexPot );
 			if (adc.value > 3000){
 				i++;
 				if (i == 5){
@@ -274,6 +292,57 @@ static void task_adc(void *pvParameters) {
 		} 
 	}
 }
+
+
+
+
+static void task_adc2(void *pvParameters) {
+	config_AFEC_pot(AFEC_POT2, AFEC_POT2_ID, AFEC_POT2_CHANNEL, AFEC_pot_Callback2);
+	TC_init(TC0, ID_TC1, 1, 1);
+	tc_start(TC0, 1);
+	
+	/* Leitura do valor atual do RTC */
+	uint32_t current_hour, current_min, current_sec;
+	uint32_t current_year, current_month, current_day, current_week;
+
+	// variável para recever dados da fila
+	adcData adc;
+	
+	int i = 0;
+	int j = 0;
+	int alarme;
+
+	while (1) {
+		if (xQueueReceive(xQueueADC2, &(adc), 1000)) {
+			rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
+			rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
+			xSemaphoreTake(xMutexPot, portMAX_DELAY );
+			printf("[AFEC 2 ] %02d:%02d:%04d %02d:%02d:%02d %d \n", current_day, current_month, current_year, current_hour, current_min, current_sec, adc.value);
+			xSemaphoreGive(xMutexPot);
+
+			if (adc.value > 3000){
+				i++;
+				if (i == 5){
+					xSemaphoreGive(xSemaphoreAfecAlarm);
+					alarme = 1;
+					i = 0;
+				}
+				} if (adc.value < 1000 && alarme){
+				j++;
+				if (j == 10){
+					xSemaphoreGive(xSemaphoreDeletaAlarme);
+					alarme = 0;
+					j = 0;
+				}
+			}
+		}
+	}
+}
+
+
+
+
+
 
 static void task_event(void *pvParameters) {
 	// variável para recever dados da fila
@@ -303,8 +372,10 @@ static void task_event(void *pvParameters) {
 				xSemaphoreGive(xSemaphoreEventAlarm);	
 			}
 
-			
+			xSemaphoreTake(xMutexPot, portMAX_DELAY );
 			printf("[EVENT ] %02d:%02d:%04d %02d:%02d:%02d  %d: %d\n", current_day, current_month, current_year, current_hour, current_min, current_sec, but.but, but.status);
+			xSemaphoreGive(xMutexPot );
+
 		} 
 	}
 }
@@ -321,13 +392,17 @@ static void task_alarm(void *pvParameters) {
 		if (xSemaphoreTake(xSemaphoreAfecAlarm, 10 / portTICK_PERIOD_MS)) {
 			rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
 			rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
+			xSemaphoreTake(xMutexPot, portMAX_DELAY );
 			printf("[ALARM ] %02d:%02d:%04d %02d:%02d:%02d  AFEC\n", current_day, current_month, current_year, current_hour, current_min, current_sec);
+			xSemaphoreGive(xMutexPot );
 			TC_init(TC1, ID_TC4, 1, 5);
 			tc_start(TC1, 1);
 		} if (xSemaphoreTake(xSemaphoreEventAlarm, 10 / portTICK_PERIOD_MS)) {
 			rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
 			rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
+			xSemaphoreTake(xMutexPot, portMAX_DELAY );
 			printf("[ALARM ] %02d:%02d:%04d %02d:%02d:%02d  EVENT\n", current_day, current_month, current_year, current_hour, current_min, current_sec);
+			xSemaphoreGive(xMutexPot);
 			TC_init(TC0, ID_TC2, 2, 5);
 			tc_start(TC0, 2);
 		}
@@ -541,8 +616,15 @@ int main(void) {
 	if (xSemaphoreEventAlarm == NULL)
 		printf("falha em criar o semaforo \n");
 	
+	xMutexPot = xSemaphoreCreateMutex();
+
+	
 	xQueueADC = xQueueCreate(100, sizeof(adcData));
 	  if (xQueueADC == NULL)
+		printf("falha em criar a queue xQueueADC \n");
+
+	xQueueADC2 = xQueueCreate(100, sizeof(adcData));
+	if (xQueueADC == NULL)
 		printf("falha em criar a queue xQueueADC \n");
 
 	xQueueEvent = xQueueCreate(100, sizeof(adcDataBut));
@@ -555,6 +637,10 @@ int main(void) {
 	
 	if (xTaskCreate(task_adc, "ADC", TASK_ADC_STACK_SIZE, NULL, TASK_ADC_STACK_PRIORITY, NULL) != pdPASS) {
 		  printf("Failed to create test ADC task\r\n");
+	}
+	
+	if (xTaskCreate(task_adc2, "ADC", TASK_ADC_STACK_SIZE, NULL, TASK_ADC_STACK_PRIORITY, NULL) != pdPASS) {
+			printf("Failed to create test ADC task\r\n");
 	}
 
 	if (xTaskCreate(task_event, "EVENT", TASK_EVENT_STACK_SIZE, NULL, TASK_EVENT_STACK_PRIORITY, NULL) != pdPASS) {
