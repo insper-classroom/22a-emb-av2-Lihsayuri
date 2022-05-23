@@ -97,6 +97,8 @@ void io_init(void);
 void TC_init(Tc *TC, int ID_TC, int TC_CHANNEL, int freq);
 static void config_AFEC_pot(Afec *afec, uint32_t afec_id, uint32_t afec_channel, afec_callback_t callback);
 void pisca_led (int n, int t, Pio *pio, const uint32_t ul_mask);
+void pin_toggle(Pio *pio, uint32_t mask);
+
 /************************************************************************/
 /* RTOS application funcs                                               */
 /************************************************************************/
@@ -177,6 +179,26 @@ void TC1_Handler(void) {
 	afec_channel_enable(AFEC_POT, AFEC_POT_CHANNEL);
 	afec_start_software_conversion(AFEC_POT);
 }
+
+void TC4_Handler(void) {
+	/**
+	* Devemos indicar ao TC que a interrupção foi satisfeita.
+	* Isso é realizado pela leitura do status do periférico
+	**/
+	volatile uint32_t status = tc_get_status(TC1, 1);
+
+	pin_toggle(LED_1_PIO, LED_1_IDX_MASK);
+	
+}
+
+void TC2_Handler(void) {
+
+	volatile uint32_t status = tc_get_status(TC0, 2);
+
+	/** Muda o estado do LED (pisca) **/
+	pin_toggle(LED_2_PIO, LED_2_IDX_MASK);  
+}
+
 
 
 void RTC_Handler(void) {
@@ -288,13 +310,14 @@ static void task_alarm(void *pvParameters) {
 			rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
 			rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
 			printf("[ALARM ] %02d:%02d:%04d %02d:%02d:%02d  AFEC\n", current_day, current_month, current_year, current_hour, current_min, current_sec);
-			pisca_led(10, 100, LED_1_PIO, LED_1_IDX_MASK);
+			TC_init(TC1, ID_TC4, 1, 5);
+			tc_start(TC1, 1);
 		} if (xSemaphoreTake(xSemaphoreEventAlarm, 10 / portTICK_PERIOD_MS)) {
 			rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
 			rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
 			printf("[ALARM ] %02d:%02d:%04d %02d:%02d:%02d  EVENT\n", current_day, current_month, current_year, current_hour, current_min, current_sec);
-			pisca_led(10, 100, LED_2_PIO, LED_2_IDX_MASK);
-			vTaskDelay(100);
+			TC_init(TC0, ID_TC2, 2, 5);
+			tc_start(TC0, 2);
 		}
 	}
 }
@@ -321,6 +344,13 @@ void pisca_led (int n, int t, Pio *pio, const uint32_t ul_mask) {
 		pio_set(pio, ul_mask);
 		delay_ms(t);
 	}
+}
+
+void pin_toggle(Pio *pio, uint32_t mask) {
+	if(pio_get_output_data_status(pio, mask))
+	pio_clear(pio, mask);
+	else
+	pio_set(pio,mask);
 }
 
 
@@ -431,9 +461,9 @@ void io_init(void) {
 	pmc_enable_periph_clk(BUT_2_PIO_ID);
 	pmc_enable_periph_clk(BUT_3_PIO_ID);
 
-	pio_configure(LED_1_PIO, PIO_OUTPUT_0, LED_1_IDX_MASK, PIO_DEFAULT);
-	pio_configure(LED_2_PIO, PIO_OUTPUT_0, LED_2_IDX_MASK, PIO_DEFAULT);
-	pio_configure(LED_3_PIO, PIO_OUTPUT_0, LED_3_IDX_MASK, PIO_DEFAULT);
+	pio_configure(LED_1_PIO, PIO_OUTPUT_1, LED_1_IDX_MASK, PIO_DEFAULT);
+	pio_configure(LED_2_PIO, PIO_OUTPUT_1, LED_2_IDX_MASK, PIO_DEFAULT);
+	pio_configure(LED_3_PIO, PIO_OUTPUT_1, LED_3_IDX_MASK, PIO_DEFAULT);
 
 	pio_configure(BUT_1_PIO, PIO_INPUT, BUT_1_IDX_MASK,
 	PIO_PULLUP | PIO_DEBOUNCE);
